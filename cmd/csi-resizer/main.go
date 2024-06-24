@@ -90,7 +90,7 @@ func main() {
 		fmt.Println(os.Args[0], version)
 		os.Exit(0)
 	}
-	klog.Infof("Version : %s", version)
+	klog.Infof("Custom Version : %s", version)
 
 	if *metricsAddress != "" && *httpEndpoint != "" {
 		klog.Error("only one of `--metrics-address` and `--http-endpoint` can be set.")

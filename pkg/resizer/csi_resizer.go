@@ -115,7 +115,16 @@ func (r *csiResizer) CanSupport(pv *v1.PersistentVolume, pvc *v1.PersistentVolum
 	}
 	source := pv.Spec.CSI
 	if source == nil {
-		klog.V(4).Infof("PV %s is not a CSI volume, skip it", pv.Name)
+		klog.V(4).Infof("PV %s is not a CSI volume, check local", pv.Name)
+		local := pv.Spec.Local
+		if local == nil {
+			klog.V(4).Infof("PV %s is not a local volume, skip it", pv.Name)
+			return false
+		}
+		klog.V(4).Infof("PV %s Annotations: %v", pv.Name, pv.Annotations)
+		if r.name == pv.Annotations["pv.kubernetes.io/provisioned-by"] {
+			return true
+		}
 		return false
 	}
 	if source.Driver != r.name {
@@ -133,6 +142,7 @@ func (r *csiResizer) DriverSupportsControlPlaneExpansion() bool {
 // It supports both CSI volume and migrated in-tree volume
 func (r *csiResizer) Resize(pv *v1.PersistentVolume, requestSize resource.Quantity) (resource.Quantity, bool, error) {
 	oldSize := pv.Spec.Capacity[v1.ResourceStorage]
+	isCfsLocal := r.name == pv.Annotations["pv.kubernetes.io/provisioned-by"]
 
 	var volumeID string
 	var source *v1.CSIPersistentVolumeSource
@@ -157,7 +167,13 @@ func (r *csiResizer) Resize(pv *v1.PersistentVolume, requestSize resource.Quanti
 			volumeID = source.VolumeHandle
 		} else {
 			// non-migrated in-tree volume
-			return oldSize, false, fmt.Errorf("volume %v is not migrated to CSI", pv.Name)
+			if isCfsLocal {
+				volumeID = pv.Name
+				pvSpec = pv.Spec
+				klog.Infof("volume %v is not migrated to CSI, but still support expand", pv.Name)
+			} else {
+				return oldSize, false, fmt.Errorf("volume %v is not migrated to CSI", pv.Name)
+			}
 		}
 	}
 
@@ -166,18 +182,61 @@ func (r *csiResizer) Resize(pv *v1.PersistentVolume, requestSize resource.Quanti
 	}
 
 	var secrets map[string]string
-	secreRef := source.ControllerExpandSecretRef
-	if secreRef != nil {
-		var err error
-		secrets, err = getCredentials(r.k8sClient, secreRef)
-		if err != nil {
-			return oldSize, false, err
+	if isCfsLocal {
+		if pv.Spec.ClaimRef == nil || pv.Spec.Local == nil {
+			return oldSize, false, fmt.Errorf("volume %v no claimRef or local set", pv.Name)
+		}
+		nodeAffinity := pv.Spec.NodeAffinity
+		if nodeAffinity == nil {
+			return oldSize, false, fmt.Errorf("volume %v no NodeAffinity set", pv.Name)
+		}
+		required := nodeAffinity.Required
+		if required == nil {
+			return oldSize, false, fmt.Errorf("volume %v no NodeAffinity.Required set", pv.Name)
+		}
+
+		node := ""
+		for _, selectorTerm := range required.NodeSelectorTerms {
+			for _, expression := range selectorTerm.MatchExpressions {
+				if expression.Key == "kubernetes.io/hostname" && expression.Operator == v1.NodeSelectorOpIn {
+					if len(expression.Values) != 1 {
+						return oldSize, false, fmt.Errorf("volume %v multiple values for the node affinity", pv.Name)
+					}
+					node = expression.Values[0]
+					break
+				}
+			}
+			if node != "" {
+				break
+			}
+		}
+		if node == "" {
+			return oldSize, false, fmt.Errorf("volume %v cannot find affinited node", pv.Name)
+		}
+		secrets = map[string]string{}
+		secrets["pvcNamespace"] = pv.Spec.ClaimRef.Namespace
+		secrets["pvcName"] = pv.Spec.ClaimRef.Name
+		secrets["pvName"] = pv.Name
+		secrets["localDevicePath"] = pv.Spec.Local.Path
+		secrets["nodeName"] = node
+	} else {
+		secreRef := source.ControllerExpandSecretRef
+		if secreRef != nil {
+			var err error
+			secrets, err = getCredentials(r.k8sClient, secreRef)
+			if err != nil {
+				return oldSize, false, err
+			}
 		}
 	}
 
 	capability, err := r.getVolumeCapabilities(pvSpec)
 	if err != nil {
-		return oldSize, false, fmt.Errorf("failed to get capabilities of volume %s with %v", pv.Name, err)
+		if isCfsLocal {
+			klog.Infof("volume %v is not migrated to CSI, to continue", pv.Name)
+		} else {
+			return oldSize, false, fmt.Errorf("failed to get capabilities of volume %s with %v", pv.Name, err)
+		}
 	}
 
 	ctx, cancel := timeoutCtx(r.timeout)
