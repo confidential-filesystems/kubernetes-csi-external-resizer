@@ -3,7 +3,7 @@
 set -e
 SERVICE_NAME=kubernetes-csi-external-resizer
 VERSION=v1.9.2-filesystem-d1
-HUB=hub.confidentialfilesystems.com:4443
+HUB=hub.confidentialfilesystems.com:30443
 
 git pull
 
