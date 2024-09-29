@@ -1,6 +1,6 @@
 FROM confidentialfilesystems/go:v1.21.7-amd64 AS builder
 
-ARG VERSION=v1.9.2-filesystem-d2
+ARG VERSION=v1.9.2-filesystem-r1
 
 RUN mkdir -p -m 0600 ~/.ssh && \
     ssh-keyscan -H github.com >> ~/.ssh/known_hosts
